@@ -48,6 +48,24 @@ from kivy.core.audio import Sound, SoundLoader
 from kivy.logger import Logger
 from kivy.clock import Clock
 
+
+# SDL audio backends such as PulseAudio run their own threads and may call SDL
+# event filters from them. Kivy's window event filter takes the GIL, so the
+# blocking init calls in mix_init() must release the GIL. Otherwise this
+# thread waits for the backend while the backend waits for the GIL (deadlock).
+# These declare the same C functions as sdl2.pxi, under different Cython
+# names, marked nogil so they can be called inside "with nogil".
+
+cdef extern from "SDL.h":
+    int SDL_Init_nogil "SDL_Init"(Uint32 flags) nogil
+
+cdef extern from "SDL_mixer.h":
+    int Mix_Init_nogil "Mix_Init"(int flags) nogil
+    int Mix_OpenAudio_nogil "Mix_OpenAudio"(
+        int frequency, unsigned short fmt, int channels, int chunksize
+    ) nogil
+
+
 cdef int mix_is_init = 0
 cdef int mix_flags = 0
 
@@ -58,6 +76,7 @@ cdef mix_init():
     cdef int audio_channels = 2
     cdef int audio_buffers = 4096
     cdef int want_flags = 0
+    cdef int rc = 0
     global mix_is_init
     global mix_flags
 
@@ -65,7 +84,10 @@ cdef mix_init():
     if mix_is_init != 0:
         return
 
-    if SDL_Init(SDL_INIT_AUDIO) < 0:
+    # GIL released: see the note above the extern declarations
+    with nogil:
+        rc = SDL_Init_nogil(SDL_INIT_AUDIO)
+    if rc < 0:
         Logger.critical('AudioSDL2: Unable to initialize SDL: {}'.format(
                         SDL_GetError()))
         mix_is_init = -1
@@ -79,9 +101,14 @@ cdef mix_init():
     want_flags = MIX_INIT_FLAC | MIX_INIT_OGG | MIX_INIT_MP3
     want_flags |= MIX_INIT_MOD | 0x20 | 0x4
 
-    mix_flags = Mix_Init(want_flags)
+    with nogil:
+        rc = Mix_Init_nogil(want_flags)
+    mix_flags = rc
 
-    if Mix_OpenAudio(audio_rate, audio_format, audio_channels, audio_buffers):
+    with nogil:
+        rc = Mix_OpenAudio_nogil(
+            audio_rate, audio_format, audio_channels, audio_buffers)
+    if rc:
         Logger.critical('AudioSDL2: Unable to open mixer: {}'.format(
                         Mix_GetError()))
         mix_is_init = -1
